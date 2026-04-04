@@ -48,7 +48,7 @@ def run_backtest_engine(ticker, gap_type):
             # Entry logic based on selected gap definition
             is_gap = curr_open < df['PrevLow'].iloc[i] if gap_type == "Strict (Prev Low)" else curr_open < df['PrevClose'].iloc[i]
             
-            if is_gap and curr_rsi < 10:
+            if is_gap and curr_rsi < 5:
                 entry_price = curr_open
                 # EXIT: Hard exit at next day's close
                 exit_price = df['Close'].iloc[i + 1] 
