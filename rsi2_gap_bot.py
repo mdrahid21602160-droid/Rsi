@@ -8,11 +8,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="RSI(2) Next-Day Close Bot", page_icon="📈", layout="wide")
+st.set_page_config(page_title="RSI(2) Low Quant Bot", page_icon="📉", layout="wide")
 
 # --- TECHNICAL CALCULATIONS ---
 def calculate_rsi_wilder(data, period=2):
-    """Standard Wilder's RSI for 2-period mean reversion."""
+    """Wilder's Smoothing for short-term RSI."""
     delta = data.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -23,42 +23,50 @@ def calculate_rsi_wilder(data, period=2):
 
 def run_backtest_engine(ticker, gap_type):
     try:
-        # Fetching max history for your 25-year requirement
+        # Fetching max history for 25-year backtest horizon
         df = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
         
         if df.empty or len(df) < 50:
             return None
 
-        # Flatten Multi-Index headers to ensure 'Open'/'Close' are found
+        # Flatten Multi-Index headers for newer yfinance versions
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Technical Signal Setup
-        df['RSI2'] = calculate_rsi_wilder(df['Close'], 2)
+        # Technical Signal Setup: RSI(2) of the LOW
+        df['RSI2_Low'] = calculate_rsi_wilder(df['Low'], 2)
         df['PrevLow'] = df['Low'].shift(1)
         df['PrevClose'] = df['Close'].shift(1)
-        df = df.dropna(subset=['RSI2', 'PrevLow', 'PrevClose'])
+        df = df.dropna(subset=['RSI2_Low', 'PrevLow', 'PrevClose'])
         
         trades = []
-        # Loop stops at len-1 because we need the 'next day' close for the exit
         for i in range(len(df) - 1):
             curr_open = df['Open'].iloc[i]
-            curr_rsi = df['RSI2'].iloc[i]
+            curr_close = df['Close'].iloc[i]
+            curr_rsi_low = df['RSI2_Low'].iloc[i]
             
-            # Entry logic based on selected gap definition
+            # Entry logic: Gap Down and RSI(2) of Low < 5
             is_gap = curr_open < df['PrevLow'].iloc[i] if gap_type == "Strict (Prev Low)" else curr_open < df['PrevClose'].iloc[i]
             
-            if is_gap and curr_rsi < 5:
+            if is_gap and curr_rsi_low < 5:
                 entry_price = curr_open
-                # EXIT: Hard exit at next day's close
-                exit_price = df['Close'].iloc[i + 1] 
+                
+                # EXIT RULE 1: Sell at close of CURRENT candle if in profit
+                if curr_close > entry_price:
+                    exit_price = curr_close
+                    exit_date = df.index[i]
+                else:
+                    # EXIT RULE 2: Hard exit at close of NEXT candle
+                    exit_price = df['Close'].iloc[i + 1]
+                    exit_date = df.index[i + 1]
                 
                 pct_change = ((exit_price - entry_price) / entry_price) * 100
                 
                 trades.append({
                     "Date": df.index[i],
                     "Entry": round(float(entry_price), 2),
-                    "Exit Date": df.index[i + 1],
+                    "RSI(2) Low": round(float(curr_rsi_low), 2),
+                    "Exit Date": exit_date,
                     "Exit Price": round(float(exit_price), 2),
                     "Return %": round(float(pct_change), 2)
                 })
@@ -72,49 +80,50 @@ def run_backtest_engine(ticker, gap_type):
 with st.sidebar:
     st.header("Strategy Settings")
     gap_mode = st.selectbox("Gap Down Definition", ["Standard (Prev Close)", "Strict (Prev Low)"])
-    st.info("Exit Rule: Sell at Close Next Day")
+    st.info("Entry: Gap Down + RSI(2) Low < 5")
+    st.info("Exit: Close Today (if profit) or Close Tomorrow (Hard Exit)")
     
     st.markdown("---")
     tickers = st.multiselect("Symbols", ["AMD", "NVDA", "TSLA", "META", "COIN", "AAPL", "MSFT"], default=["AMD", "NVDA", "TSLA"])
 
 # --- MAIN UI ---
-st.title("📈 RSI(2) Next-Day Exit Strategy")
-st.caption("Customized for: No Target | Hard Exit at Next Day Close | 25-Year Depth Analysis")
+st.title("📈 RSI(2) Low Strategy Bot")
+st.caption("25-Year Backtesting Engine | RSI(2) of Low < 5 | Hard Exit Logic")
 
 tab1, tab2 = st.tabs(["Live Scanner", "Full Backtest Engine"])
 
 with tab1:
-    st.subheader("Real-Time Monitor")
+    st.subheader("Live Monitor")
     if st.button("Scan Now", type="primary"):
-        st.info("Scanning current market for RSI(2) < 10 gap-down entries...")
+        st.info("Scanning for gap-downs where intraday RSI(2) of Low is below 5...")
 
 with tab2:
-    selected_ticker = st.selectbox("Select Ticker for Depth Analysis", tickers)
+    selected_ticker = st.selectbox("Select Ticker for Analysis", tickers)
     if st.button("Run Full Backtest", type="primary"):
-        with st.spinner(f"Processing 25 years of data for {selected_ticker}..."):
+        with st.spinner(f"Analyzing historical data for {selected_ticker}..."):
             df_results = run_backtest_engine(selected_ticker, gap_mode)
             
             if df_results is not None and not df_results.empty:
-                # Core Metrics
+                # Metrics
                 win_rate = (df_results['Return %'] > 0).mean() * 100
                 total_ret = df_results['Return %'].sum()
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Win Rate", f"{win_rate:.1f}%")
-                c2.metric("Total Accumulated Return", f"{total_ret:.1f}%")
-                c3.metric("Total Trades Found", len(df_results))
+                c2.metric("Total Return", f"{total_ret:.1f}%")
+                c3.metric("Trades Found", len(df_results))
                 
-                # Performance Visualization
+                # Equity Curve
                 df_results['Equity'] = df_results['Return %'].cumsum()
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df_results['Date'], y=df_results['Equity'], name="Cumulative Return"))
-                fig.update_layout(title=f"{selected_ticker} Next-Day Exit Performance", xaxis_title="Year", yaxis_title="Cumulative Return (%)")
+                fig.add_trace(go.Scatter(x=df_results['Date'], y=df_results['Equity'], name="Cumulative %"))
+                fig.update_layout(title=f"{selected_ticker} Cumulative Performance", xaxis_title="Year", yaxis_title="Return (%)")
                 st.plotly_chart(fig, use_container_width=True)
                 
                 st.subheader("Trade Ledger")
                 st.dataframe(df_results, use_container_width=True)
             else:
-                st.error("No trades found. Try 'Standard (Prev Close)' for more triggers.")
+                st.error("No trades found. Try 'Standard (Prev Close)' or check ticker history.")
 
 st.divider()
-st.caption("Quantitative Trading Tool | Built for 25-Year Mean Reversion Backtesting")
+st.caption("Quantitative Trading Tool | Built for High-Beta Mean Reversion Analysis")
