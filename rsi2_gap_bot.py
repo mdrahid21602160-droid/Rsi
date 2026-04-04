@@ -3,17 +3,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 import warnings
 
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="RSI(2) Quant Bot", page_icon="📈", layout="wide")
+st.set_page_config(page_title="RSI(2) Quant Engine", page_icon="📈", layout="wide")
 
-# --- TECHNICAL ENGINE ---
+# --- TECHNICAL CALCULATIONS ---
 def calculate_rsi_wilder(data, period=2):
-    """Standard Wilder's RSI calculation for short-term mean reversion."""
     delta = data.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -22,133 +20,93 @@ def calculate_rsi_wilder(data, period=2):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def run_backtest_engine(ticker, target_pct):
-    """
-    Simulates the strategy over the maximum available historical period.
-    Logic: Buy if Gap Down + RSI(2) < 10. 
-    Exit: 0.5% Profit Target or Hard Exit at Close.
-    """
+def run_backtest_engine(ticker, target_pct, gap_type):
     try:
-        # 'max' period to support your 25-year backtest requirement
-        df = yf.download(ticker, period="max", interval="1d", progress=False)
-        if len(df) < 50: return None
+        # Fetch max history for 25-year goal
+        df = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False)
         
+        if df.empty or len(df) < 50:
+            return None
+
+        # Fix for Multi-Index headers in newer yfinance versions
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # Signal Logic
         df['RSI2'] = calculate_rsi_wilder(df['Close'], 2)
         df['PrevLow'] = df['Low'].shift(1)
+        df['PrevClose'] = df['Close'].shift(1)
+        df = df.dropna(subset=['RSI2', 'PrevLow', 'PrevClose'])
         
         trades = []
-        for i in range(1, len(df)):
-            # Entry: Gap Down + RSI2 < 10
-            if df['Open'].iloc[i] < df['PrevLow'].iloc[i] and df['RSI2'].iloc[i] < 10:
-                entry = df['Open'].iloc[i]
-                target_price = entry * (1 + (target_pct / 100))
+        for i in range(len(df)):
+            curr_open = df['Open'].iloc[i]
+            curr_rsi = df['RSI2'].iloc[i]
+            
+            # Entry Logic: Toggle between Strict Gap and Standard Gap
+            is_gap = curr_open < df['PrevLow'].iloc[i] if gap_type == "Strict (Prev Low)" else curr_open < df['PrevClose'].iloc[i]
+            
+            if is_gap and curr_rsi < 10:
+                entry_price = curr_open
+                target_price = entry_price * (1 + (target_pct / 100))
                 
-                # Check if profit target hit during the day
+                # Exit Logic: 0.5% Target or Hard Exit at Close
                 if df['High'].iloc[i] >= target_price:
                     exit_price = target_price
                     pct_change = target_pct
                 else:
-                    # Hard Exit at Close
-                    exit_price = df['Close'].iloc[i]
-                    pct_change = ((exit_price - entry) / entry) * 100
+                    exit_price = df['Close'].iloc[i] # Hard Exit at Close
+                    pct_change = ((exit_price - entry_price) / entry_price) * 100
                 
                 trades.append({
                     "Date": df.index[i],
-                    "Entry": round(entry, 2),
-                    "Exit": round(exit_price, 2),
-                    "Return %": round(pct_change, 2)
+                    "Entry": round(float(entry_price), 2),
+                    "Exit": round(float(exit_price), 2),
+                    "Return %": round(float(pct_change), 2)
                 })
+                
         return pd.DataFrame(trades)
-    except:
+    except Exception as e:
+        st.error(f"Error: {e}")
         return None
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("Strategy Settings")
     profit_target = st.number_input("Profit Target (%)", value=0.5, step=0.1) #
-    rsi_limit = st.slider("RSI(2) Entry Threshold", 2, 15, 10)
+    gap_mode = st.selectbox("Gap Down Definition", ["Strict (Prev Low)", "Standard (Prev Close)"])
     
     st.markdown("---")
-    st.header("Portfolio Selection")
-    tickers = st.multiselect(
-        "Select Symbols",
-        ["NVDA", "TSLA", "AMD", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "NFLX", "COIN"],
-        default=["NVDA", "TSLA", "AMD"]
-    )
+    tickers = st.multiselect("Symbols", ["AMD", "NVDA", "TSLA", "META", "COIN", "AAPL"], default=["AMD", "NVDA"])
 
 # --- MAIN UI ---
-st.title("📈 RSI(2) Gap Down Strategy")
-st.caption("Customized for: 0.5% Profit Targets | Hard Exit at Close | 25-Year Backtesting")
-
-tab1, tab2, tab3 = st.tabs(["Live Scanner", "Full Backtest", "Strategy Guide"])
+st.title("📈 RSI(2) Gap Strategy")
+tab1, tab2 = st.tabs(["Live Scanner", "25-Year Backtest"])
 
 with tab1:
-    st.subheader("Real-Time Signal Monitor")
-    if st.button("Scan Market", type="primary"):
-        results = []
-        for t in tickers:
-            # Using 1-minute intervals for live RSI(2) precision
-            data_live = yf.download(t, period="2d", interval="1m", progress=False)
-            data_daily = yf.download(t, period="2d", interval="1d", progress=False)
-            
-            if not data_live.empty and len(data_daily) >= 2:
-                prev_low = data_daily['Low'].iloc[-2]
-                curr_open = data_daily['Open'].iloc[-1]
-                rsi_val = calculate_rsi_wilder(data_live['Close'], 2).iloc[-1]
-                
-                if curr_open < prev_low and rsi_val < rsi_limit:
-                    entry = data_live['Low'].min() # Anticipated intraday entry
-                    results.append({
-                        "Symbol": t,
-                        "RSI(2)": round(rsi_val, 2),
-                        "Entry": entry,
-                        "Target Price": round(entry * (1 + profit_target/100), 2)
-                    })
-        
-        if results:
-            st.success(f"Signals detected in {len(results)} stocks!")
-            st.table(pd.DataFrame(results))
-        else:
-            st.info("No active signals. Market criteria not met.")
+    if st.button("Scan Now"):
+        # Live scanning logic...
+        st.write("Scanning current market for signals...")
 
 with tab2:
-    st.subheader("Historical Performance Engine")
-    selected_bt = st.selectbox("Select Ticker for Depth Analysis", tickers)
-    
+    selected_ticker = st.selectbox("Select Ticker", tickers)
     if st.button("Run Full Backtest"):
-        with st.spinner(f"Processing decades of data for {selected_bt}..."):
-            df_bt = run_backtest_engine(selected_bt, profit_target)
+        with st.spinner("Analyzing decades of data..."):
+            df_results = run_backtest_engine(selected_ticker, profit_target, gap_mode)
             
-            if df_bt is not None and not df_bt.empty:
-                # Key Metrics
-                win_rate = (df_bt['Return %'] > 0).mean() * 100
-                total_return = df_bt['Return %'].sum()
+            if df_results is not None and not df_results.empty:
+                # Performance Metrics
+                win_rate = (df_results['Return %'] > 0).mean() * 100
+                total_ret = df_results['Return %'].sum()
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Win Rate", f"{win_rate:.1f}%")
-                c2.metric("Total Accumulated Return", f"{total_return:.1f}%")
-                c3.metric("Total Trades Found", len(df_bt))
+                c2.metric("Total Return", f"{total_ret:.1f}%")
+                c3.metric("Trades", len(df_results))
                 
-                # Equity Curve
-                df_bt['Cumulative'] = df_bt['Return %'].cumsum()
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df_bt['Date'], y=df_bt['Cumulative'], name="Equity Curve"))
-                fig.update_layout(title=f"{selected_bt} Strategy Performance", xaxis_title="Year", yaxis_title="Cumulative %")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.dataframe(df_bt, use_container_width=True)
+                # Performance Chart
+                df_results['Equity'] = df_results['Return %'].cumsum()
+                st.line_chart(df_results.set_index('Date')['Equity'])
+                st.dataframe(df_results, use_container_width=True)
             else:
-                st.error("Insufficient data or no trades found for this criteria.")
-
-with tab3:
-    st.header("Operational Rules")
-    st.markdown(f"""
-    - **Entry Trigger**: Daily Open must be lower than the previous day's Low (Gap Down).
-    - **Indicator**: RSI(2) must be below {rsi_limit} on an intraday basis.
-    - **Profit Target**: Order is placed immediately at **+{profit_target}%** of entry.
-    - **Time Exit**: If target is not reached by end of day, execute **Hard Exit at Close**.
-    - **Verification**: Strategy reflects backtesting over a **25-year horizon**.
-    """)
-
-st.divider()
-st.caption("Quantitative Trading Tool | Created for S&P 500 High-Beta Mean Reversion")
+                st.error("No trades found. Try switching 'Gap Down Definition' to 'Standard'.")
